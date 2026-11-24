@@ -7,7 +7,7 @@ Newsroom — локален прототип за автоматизирана �
         python app.py --demo     -> същото + демо данни (без интернет)
 Всички ключове, източници, проценти и думи са в Настройки (базата), нищо не е хардкоднато.
 """
-import asyncio, base64, email, hashlib, imaplib, json, math, re, secrets, sqlite3, sys, time
+import asyncio, base64, email, hashlib, hmac, imaplib, json, math, re, secrets, sqlite3, sys, time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from email.header import decode_header
@@ -24,6 +24,8 @@ import os
 # Настройки за машината (не в базата): виж README → „Постоянна работа на друг Mac“
 HOST = os.environ.get("NEWSROOM_HOST", "127.0.0.1")    # 0.0.0.0 = достъпно от мрежата (тогава паролата е задължителна)
 PORT = int(os.environ.get("NEWSROOM_PORT", "8000"))
+PUBLIC_URL = os.environ.get("NEWSROOM_PUBLIC_URL", f"http://127.0.0.1:{PORT}").rstrip("/")
+IS_HTTPS = PUBLIC_URL.startswith("https://")   # зад Cloudflare Tunnel → паролата е задължителна, cookie-то е Secure
 DB = Path(os.environ.get("NEWSROOM_DB") or Path(__file__).with_name("newsroom.db"))
 STATIC = Path(__file__).with_name("static"); (STATIC / "exports").mkdir(parents=True, exist_ok=True)
 UA = {"User-Agent": "Mozilla/5.0 NewsroomBot/0.1"}
@@ -66,6 +68,7 @@ create table if not exists missed(id integer primary key, ts real, url text, tit
 DEFAULT_SETTINGS = {
     "site_name": "Обществото",
     "admin_password": "",                     # генерира се при първи старт
+    "session_secret": "",                     # генерира се при първи старт; ключ за cookie-тата
     "fetch_every_min": "5",      # БТА връща само последните ~20 новини → при 15 мин се губят
     "boost_keywords": "Бургас, Евровизия, евро, цени, избори",
     "block_keywords": "хороскоп, промо",
@@ -305,6 +308,8 @@ def init_db():
             pw = secrets.token_urlsafe(8)
             c.execute("update settings set value=? where key='admin_password'", (pw,))
             print(f"\n*** Админ парола: {pw}  (смени я в Настройки) ***\n")
+        if not c.execute("select value from settings where key='session_secret'").fetchone()[0]:
+            c.execute("update settings set value=? where key='session_secret'", (secrets.token_hex(32),))
         if not c.execute("select count(*) from sources").fetchone()[0]:
             c.executemany("insert into sources(name,kind,url,weight,owner) values(?,?,?,?,?)", DEFAULT_SOURCES)
         for name, cat in DEFAULT_CATEGORY.items():
@@ -1015,7 +1020,7 @@ async def ai_hook(post):
 
 CANVA_SCOPES = ("asset:read asset:write brandtemplate:meta:read brandtemplate:content:read "
                 "design:meta:read design:content:read design:content:write profile:read")
-CANVA_REDIRECT = f"http://127.0.0.1:{PORT}/admin/canva/callback"   # Canva не приема "localhost"
+CANVA_REDIRECT = f"{PUBLIC_URL}/admin/canva/callback"   # локално: http://127.0.0.1:PORT (Canva не приема "localhost")
 _PKCE = {}
 
 def _set(k, v):
@@ -1340,7 +1345,7 @@ T = {
 "live": """{% extends 'base' %}{% block c %}<h2>На живо</h2>{% if hls %}<video id=v controls autoplay muted></video><script>
 const v=document.getElementById('v'),u="{{ hls }}";if(v.canPlayType('application/vnd.apple.mpegurl'))v.src=u;else if(Hls.isSupported()){const h=new Hls();h.loadSource(u);h.attachMedia(v)}</script>
 {% else %}<p class=muted>Няма зададен live_hls_url в Настройки.</p>{% endif %}{% endblock %}""",
-"login": """{% extends 'base' %}{% block c %}<form method=post style="max-width:320px"><h2>Вход</h2><input type=password name=pw placeholder="Парола"><br><br><button class=btn>Вход</button></form>{% endblock %}""",
+"login": """{% extends 'base' %}{% block c %}<form method=post style="max-width:320px"><h2>Вход</h2>{% if 'bad=1' in path %}<p style="color:#c33">Грешна парола</p>{% endif %}<input type=password name=pw placeholder="Парола"><br><br><button class=btn>Вход</button></form>{% endblock %}""",
 "admin": """{% extends 'base' %}{% block c %}
 <div class=tabs><b>Админ:</b> <a href="{{ url(tab='rec') }}" {% if tab=='rec' %}style="font-weight:bold"{% endif %}>Препоръчани</a><a href="{{ url(tab='all') }}" {% if tab=='all' %}style="font-weight:bold"{% endif %}>Всички</a><a href="/admin/posts">Чернови/публикации</a>
 <a href="/admin/trends"><b>🧭 Компас</b></a><a href="/admin/logic">🧠 Логика</a><a href="/admin/missed">🕳 Пропусната новина</a><a href="/admin/bias">Баланс</a><a href="/admin/map">🗺 Карта</a><a href="/admin/media">📇 Медии</a><a href="/admin/sources">Източници</a><a href="/admin/instagram">📸 Instagram</a><a href="/admin/canva/setup">🎨 Canva</a><a href="/admin/improve">Подобри</a><a href="/admin/profiles">Профили</a><a href="/admin/settings">Настройки</a><a href="/admin/log">Лог</a></div><br>
@@ -1794,14 +1799,36 @@ app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 # Без парола само когато сайтът е достъпен единствено от този компютър. Отвориш ли го към мрежата — паролата е включена.
-ADMIN_LOGIN_OFF = HOST in ("127.0.0.1", "localhost") and os.environ.get("NEWSROOM_LOGIN", "off") == "off"
+# Зад tunnel заявките идват от 127.0.0.1, затова при https адрес паролата е задължителна винаги.
+ADMIN_LOGIN_OFF = (HOST in ("127.0.0.1", "localhost") and not IS_HTTPS
+                   and os.environ.get("NEWSROOM_LOGIN", "off") == "off")
+
+def session_token():
+    """Cookie-то не съдържа паролата: HMAC(таен ключ, парола). Смяна на паролата = изход за всички."""
+    return hmac.new(S("session_secret").encode(), S("admin_password").encode(), hashlib.sha256).hexdigest()
+
+def set_session(r):
+    r.set_cookie("nr", session_token(), httponly=True, samesite="lax", secure=IS_HTTPS, max_age=60 * 60 * 24 * 30)
+    return r
 
 @app.middleware("http")
 async def guard(request: Request, call_next):
     p = request.url.path
-    if not ADMIN_LOGIN_OFF and p.startswith("/admin") and p != "/admin/login" and request.cookies.get("nr") != S("admin_password"):
+    if (not ADMIN_LOGIN_OFF and p.startswith("/admin") and p != "/admin/login"
+            and not hmac.compare_digest(request.cookies.get("nr", ""), session_token())):
         return RedirectResponse("/admin/login", 303)
     return await call_next(request)
+
+@app.get("/healthz")
+def healthz():
+    """За UptimeRobot: ok, ако базата се чете и някой източник е теглен през последните 30 мин."""
+    try:
+        with db() as c: last = c.execute("select max(last_fetch) from sources").fetchone()[0] or 0
+    except Exception as e:
+        return HTMLResponse(f"db error: {e}", 503)
+    age = time.time() - last
+    return HTMLResponse("ok" if age < 1800 else f"stale: последно теглене преди {int(age // 60)} мин",
+                        200 if age < 1800 else 503)
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -1831,7 +1858,8 @@ def login_form(request: Request): return render("login", request)
 @app.post("/admin/login")
 def login(pw: str = Form("")):
     r = RedirectResponse("/admin", 303)
-    if pw == S("admin_password"): r.set_cookie("nr", pw, httponly=True, samesite="lax")
+    if pw and hmac.compare_digest(pw, S("admin_password")): set_session(r)
+    else: r = RedirectResponse("/admin/login?bad=1", 303)
     return r
 
 def regions(): return [x.strip() for x in S("region_categories").split(",") if x.strip()]
@@ -2700,7 +2728,7 @@ async def alert_now():
             _ALERTED.add(k["id"])
             why = "\n".join(f"{ic} {t} ({p:+d})" for ic, t, p in k["pts"])
             text = (f"🔥 <b>{k['total']} т.</b> — {k['title']}\n\n{why}\n\n📰 {', '.join(k['srcs'][:5])}\n"
-                    f"{k['link']}\n\nОтвори: {os.environ.get('NEWSROOM_PUBLIC_URL', f'http://127.0.0.1:{PORT}')}/admin/story/{k['item']}")
+                    f"{k['link']}\n\nОтвори: {PUBLIC_URL}/admin/story/{k['item']}")
             r = await cl.post(f"https://api.telegram.org/bot{S('telegram_bot_token')}/sendMessage",
                               data={"chat_id": S("alert_chat_id"), "text": text[:4000], "parse_mode": "HTML", "disable_web_page_preview": "true"})
             log(f"Известие: {k['title'][:60]} → {'ок' if r.status_code < 300 else r.text[:120]}")
@@ -2988,7 +3016,7 @@ async def check_profiles():
 
 @app.get("/admin/settings", response_class=HTMLResponse)
 def settings(request: Request):
-    with db() as c: rows = [(r[0], r[1]) for r in c.execute("select key,value from settings order by key")]
+    with db() as c: rows = [(r[0], r[1]) for r in c.execute("select key,value from settings where key!='session_secret' order by key")]
     how = claude_how()
     status = {"api": "през API ключ", "cli": f"през Claude Code CLI ({claude_cli()}) — без ключ, с твоя абонамент",
               None: "не е свързан — няма ключ и не намирам `claude`. Задай claude_cli_path или anthropic_api_key"}[how]
@@ -3001,8 +3029,7 @@ async def save_settings(request: Request):
         for k, v in form.items(): c.execute("update settings set value=? where key=?", (v, k))
     score_all()
     r = back("/admin/settings", "Запазено")
-    r.set_cookie("nr", S("admin_password"), httponly=True, samesite="lax")
-    return r
+    return set_session(r)   # ако паролата е сменена, текущият браузър остава вписан
 
 FRAMING = {}
 

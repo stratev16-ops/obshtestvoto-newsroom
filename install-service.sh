@@ -4,6 +4,8 @@
 # Мрежа: NEWSROOM_HOST=0.0.0.0 ./install-service.sh  → достъпно от други устройства (паролата се включва сама).
 set -e
 cd "$(dirname "$0")"; DIR="$(pwd)"
+# Локални настройки (не са в git): напр. NEWSROOM_PUBLIC_URL=https://news.obshtovzeto.com — записва ги install-tunnel.sh
+[ -f .env ] && { set -a; . ./.env; set +a; }
 [ -x .venv/bin/python ] || ./setup.sh
 HOST="${NEWSROOM_HOST:-127.0.0.1}"; PORT="${NEWSROOM_PORT:-8000}"; PUBLIC="${NEWSROOM_PUBLIC_URL:-http://127.0.0.1:$PORT}"
 LA="$HOME/Library/LaunchAgents"; mkdir -p "$LA" logs backups

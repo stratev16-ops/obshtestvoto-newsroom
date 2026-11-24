@@ -38,6 +38,21 @@ NEWSROOM_HOST=0.0.0.0 NEWSROOM_PUBLIC_URL=http://<tailscale-име>:8000 ./insta
 ```
 Щом сайтът е отворен към мрежата, **паролата за админа се включва сама** (тя е в Настройки → `admin_password`).
 
+## Публичен адрес: news.obshtovzeto.com (Cloudflare)
+
+Само екипът има достъп. Пазят го две ключалки: Cloudflare Access (код по имейл) и паролата на приложението.
+
+1. **Първо Access** (dash.cloudflare.com → **Zero Trust** → **Access** → **Applications** → **Add an application** → **Self-hosted**):
+   - домейн `news.obshtovzeto.com`, без path → policy **Allow**, **Include → Emails**: адресите на екипа;
+   - второ приложение за `news.obshtovzeto.com/healthz` с policy **Bypass → Everyone** (за мониторинга).
+2. На сървърния Mac: `./install-tunnel.sh news.obshtovzeto.com`
+   (инсталира cloudflared, създава tunnel `newsroom`, DNS записа, записва `.env` и рестартира услугата).
+3. Canva Developer Portal → app → **Authentication** → добави redirect URL `https://news.obshtovzeto.com/admin/canva/callback`.
+4. UptimeRobot → **New monitor** → HTTP(s) → `https://news.obshtovzeto.com/healthz`, на 5 мин.
+
+`/healthz` връща `ok`, ако базата се чете и новините са теглени в последните 30 мин.
+Когато `NEWSROOM_PUBLIC_URL` е https, паролата е задължителна винаги (tunnel-ът идва от 127.0.0.1).
+
 ## Ежедневна работа
 | Какво | Команда |
 | --- | --- |
