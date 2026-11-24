@@ -1,0 +1,21 @@
+# Данни и тайни — НЕ отиват в GitHub (базата пази токени, пароли и цялата история)
+newsroom.db
+newsroom.db-*
+*.db
+backups/
+live-copy.db
+_to_delete/
+.tmp_copy/
+static/exports/*
+!static/exports/.gitkeep
+app.py.bak-*
+*.bak
+.fuse_hidden*
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+logs/
+.env
+
+README.old.md
